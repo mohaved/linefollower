@@ -369,8 +369,11 @@ void handle_line_lost(void) {
     static float search_angle = 0;
     static bool increasing_angle = true;
     static bool first_search = true;
-    
-    if (time_diff > 3000) { // Extended search time
+
+    printf("DEBUG: Line lost for %lld ms\n", time_diff);
+
+    if (time_diff > 10000) { // Extended search time - 10 seconds
+        printf("DEBUG: No line found for 10 seconds, stopping robot\n");
         stop_motors();
         set_robot_state(STOPPED);
         // Reset search pattern for next time

@@ -95,9 +95,9 @@ int main() {
     // Initialize the line follower system
     init_line_follower();
 
-    printf("Line follower robot initialized\n");
-    printf("Press CALIBRATION button to calibrate sensors\n");
-    printf("Press START/STOP button to start/stop the robot\n");
+    printf("DEBUG: Line follower robot initialized\n");
+    printf("DEBUG: Press CALIBRATION button to calibrate sensors\n");
+    printf("DEBUG: Press START/STOP button to start/stop the robot\n");
 
     // Start core1 for sensor processing
     multicore_launch_core1(core1_main);
@@ -107,16 +107,16 @@ int main() {
         sleep_ms(10);
     }
 
-    printf("Core 1 ready, starting main control loop\n");
+    printf("DEBUG: Core 1 ready, starting main control loop\n");
 
     // Main control loop - handle button events and state management
     while (1) {
         // Check for calibration button press
         if (calibration_requested) {
             calibration_requested = false; // Clear flag
-            printf("Calibration button pressed - starting sensor calibration\n");
+            printf("DEBUG: Calibration button pressed - starting sensor calibration\n");
             set_robot_state(CALIBRATING);
-            printf("Calibration complete\n");
+            printf("DEBUG: Calibration complete\n");
         }
 
         // Check for start/stop button press
@@ -124,10 +124,10 @@ int main() {
             start_stop_requested = false; // Clear flag
             RobotState current_state = get_robot_state();
             if (current_state == RUNNING) {
-                printf("Stop button pressed - stopping robot\n");
+                printf("DEBUG: Stop button pressed - stopping robot\n");
                 set_robot_state(STOPPED);
             } else if (current_state == STOPPED) {
-                printf("Start button pressed - starting robot\n");
+                printf("DEBUG: Start button pressed - starting robot\n");
                 set_robot_state(RUNNING);
             }
         }

@@ -1,0 +1,139 @@
+m# Line Follower Robot Code Report
+
+## Project Overview
+This project implements a high-performance line follower robot using the Raspberry Pi Pico microcontroller. The robot uses 8 infrared sensors connected to two ADS1115 analog-to-digital converters for line detection, with PID control for precise navigation. It features dual-core processing for real-time sensor handling and motor control, supporting various line patterns including intersections and turns.
+
+## Hardware Configuration
+
+### Pin Assignments
+#### I2C Pins (ADS1115 Sensors)
+- Primary I2C Bus (i2c0):
+  - SDA: GPIO 0
+  - SCL: GPIO 1
+- Secondary I2C Bus (i2c1):
+  - SDA: GPIO 8
+  - SCL: GPIO 9
+
+#### Motor Control Pins (PWM for TC1508A Driver)
+- Left Motor Forward: GPIO 2
+- Left Motor Backward: GPIO 3
+- Right Motor Forward: GPIO 4
+- Right Motor Backward: GPIO 5
+
+#### Button Pins
+- Calibration Button: GPIO 14
+- Start/Stop Button: GPIO 15
+
+### Sensors
+- Two ADS1115 ADC modules:
+  - Left ADS1115: I2C address 0x48 (ADDR grounded)
+  - Right ADS1115: I2C address 0x49 (ADDR to VDD)
+- 8 analog infrared sensors (4 per ADS1115)
+- Sensors read at 860 SPS for fast response
+
+## Software Architecture
+
+### Core Files
+1. **line_follower.h** - Header file containing:
+   - Type definitions (LinePattern, RobotState, PIDController, etc.)
+   - Pin definitions and constants
+   - Function declarations
+   - Shared control structures for inter-core communication
+
+2. **line_follower.c** - Main implementation file containing:
+   - Initialization functions (I2C, motors, sensors, buttons)
+   - Sensor reading and calibration
+   - Line position calculation and pattern detection
+   - PID controller implementation
+   - Motor control functions
+   - Core 1 sensor processing loop
+   - State management and line recovery
+
+3. **main.c** - Entry point and Core 0 main loop:
+   - System initialization
+   - Core 1 launch for sensor processing
+   - Button handling and state transitions
+   - Motor speed calculations and updates
+   - Inter-core data synchronization
+
+4. **CMakeLists.txt** - Build configuration:
+   - Pico SDK integration
+   - Source file compilation
+   - Hardware library linking
+   - Build target definitions
+
+## Key Features
+
+### Line Detection and Pattern Recognition
+- 8-sensor array with normalization and calibration
+- Pattern detection for:
+  - Straight lines
+  - 90-degree turns (left/right)
+  - T-intersections (left/right/up)
+  - Cross intersections
+  - Y-intersections
+  - Line ends
+
+### Control Systems
+- PID controller with anti-windup protection
+- Adaptive speed profiles based on path type:
+  - Straight: 255 (max speed)
+  - Curves: 180
+  - Turns: 150
+  - Creep: 100 (precise movements)
+
+### Dual-Core Processing
+- Core 0: Main control loop, button handling, motor updates
+- Core 1: High-frequency sensor processing (2kHz loop)
+- Mutex-protected shared data structures
+
+### Advanced Features
+- Smart line recovery with systematic search patterns
+- Hysteresis for sensor activation
+- Error handling for I2C communication
+- Interrupt-based button handling
+- Real-time state management
+
+## Build and Deployment
+
+### Build Process
+- Uses CMake with Pico SDK
+- Compiles to ELF binary (line_follower_robot.elf)
+- Links hardware libraries (GPIO, PWM, I2C, multicore)
+
+### Flashing
+- Use picotool or OpenOCD to flash the ELF file
+- Command example: `picotool load line_follower_robot.elf -f`
+
+## Operation
+
+### Startup Sequence
+1. Initialize hardware (I2C, motors, sensors, buttons)
+2. Launch Core 1 for sensor processing
+3. Wait for calibration button press
+4. Enter main control loop
+
+### Control Flow
+- Core 1 continuously reads sensors and calculates position/PID
+- Core 0 processes button inputs and updates motor speeds
+- Shared control structure synchronizes data between cores
+
+### States
+- STOPPED: Motors off, waiting for start
+- RUNNING: Active line following
+- CALIBRATING: Sensor calibration in progress
+- LINE_LOST: Recovery mode active
+
+## Performance Characteristics
+- Sensor update rate: 2kHz
+- PID control with advanced filtering
+- Low-latency motor control
+- Robust error recovery
+- Efficient dual-core utilization
+
+## Dependencies
+- Raspberry Pi Pico SDK
+- Hardware libraries: GPIO, PWM, I2C, multicore
+- Standard C libraries: stdio, stdint, math, string
+
+This implementation provides a complete, production-ready line follower robot with advanced features for reliable navigation on complex line courses.
