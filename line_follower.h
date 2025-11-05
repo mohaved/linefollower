@@ -9,6 +9,18 @@
 #include "hardware/irq.h"
 #include <stdint.h>
 
+// PID and Control Constants
+#define PID_SCALE           100.0f    // PID output scaling factor
+#define TURN_ASYMMETRY      1.2f      // Inner wheel reduction factor for turns
+#define LINE_DETECT_THRESH  0.2f      // Threshold for line detection
+#define LINE_POSITION_NORM  3.5f      // Position normalization factor
+#define MAX_SEARCH_TIME_MS  3000      // Maximum line search time
+#define SEARCH_ANGLE_STEP   5.0f      // Search pattern angle increment
+#define PWM_MAX            255        // Maximum PWM value
+#define MIN_SPEED_HIGH     60         // Minimum speed for high base_speed
+#define MIN_SPEED_LOW      40         // Minimum speed for low base_speed
+#define HIGH_SPEED_THRESH  180        // Threshold for high/low speed behavior
+
 // Pin definitions
 #define I2C_SDA_PIN 0
 #define I2C_SCL_PIN 1
@@ -32,6 +44,20 @@
 #define ADS1115_REG_CONVERSION 0x00
 #define ADS1115_REG_CONFIG 0x01
 
+// Line pattern types
+typedef enum {
+    STRAIGHT_LINE,
+    LEFT_TURN_90,
+    RIGHT_TURN_90,
+    T_INTERSECTION_LEFT,   // ├
+    T_INTERSECTION_RIGHT,  // ┤
+    T_INTERSECTION_UP,     // ┴
+    CROSS_INTERSECTION,    // ┼
+    Y_INTERSECTION,        // Y split
+    LINE_END,
+    NO_LINE
+} LinePattern;
+
 // Robot states
 typedef enum {
     STOPPED,
@@ -49,28 +75,15 @@ typedef struct {
     float integral;
 } PIDController;
 
-// Line pattern types
-typedef enum {
-    STRAIGHT_LINE,
-    LEFT_TURN_90,
-    RIGHT_TURN_90,
-    T_INTERSECTION_LEFT,   // ├
-    T_INTERSECTION_RIGHT,  // ┤
-    T_INTERSECTION_UP,     // ┴
-    CROSS_INTERSECTION,    // ┼
-    Y_INTERSECTION,        // Y split
-    LINE_END,
-    NO_LINE
-} LinePattern;
-
 // Line sensor data structure
 typedef struct {
     uint16_t raw_values[8];
     uint16_t calibrated_min[8];
     uint16_t calibrated_max[8];
     float position;
-    LinePattern pattern;
-    uint8_t active_sensors;
+    LinePattern pattern;    // Current detected pattern
+    uint8_t active_sensors; // Number of active sensors
+    float normalized[8];    // Normalized sensor values (0.0-1.0)
 } LineSensorArray;
 
 // Function declarations
@@ -107,11 +120,25 @@ void core1_sensor_handler(void);
 void set_robot_state(RobotState new_state);
 RobotState get_robot_state(void);
 
+// Intersection action types
+typedef enum {
+    NO_ACTION,
+    FORWARD_CROSS,     // Go straight through intersection
+    SLOW_FORWARD,      // Slow down and continue straight
+    TURN_LEFT,         // Make a left turn
+    TURN_RIGHT,        // Make a right turn
+    Y_SPLIT_CENTER     // Handle Y intersection with center bias
+} IntersectionAction;
+
 // Shared control structure for inter-core communication
 typedef struct {
     mutex_t mutex;
     float pid_output;
+    uint16_t base_speed;      // Dynamic base speed based on path type
     bool new_data;
+    IntersectionAction intersection_action;  // Current intersection handling request
+    bool intersection_active;                // True while handling an intersection
+    LinePattern current_pattern;            // Current detected line pattern
 } SharedControl;
 
 extern SharedControl shared_control;
@@ -120,6 +147,6 @@ extern SharedControl shared_control;
 extern mutex_t motor_mutex;
 
 // Utility functions
-void handle_intersection(LineSensorArray *sensors);
+LinePattern detect_line_pattern(LineSensorArray *sensors);
 
 #endif // LINE_FOLLOWER_H

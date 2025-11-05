@@ -1,34 +1,139 @@
-#include "line_follower.h"
-#include "hardware/adc.h"
-#include "hardware/timer.h"
+#include <stdio.h>
+#include <stdint.h>
 #include <string.h>
+#include <math.h>
+
+#include "pico/stdlib.h"
+#include "pico/time.h"
+#include "hardware/gpio.h"
+#include "hardware/pwm.h"
+#include "hardware/i2c.h"
+#include "line_follower.h"
+
+// Pattern detection thresholds
+#define SENSOR_THRESHOLD     0.5f    // Threshold for sensor activation (normalized)
+#define LINE_DETECT_MIN      0.2f    // Minimum value to consider line detected
+#define CROSS_THRESHOLD      7       // Minimum sensors for cross intersection
+#define T_THRESHOLD         5       // Minimum sensors for T intersection
+#define TURN_THRESHOLD      3       // Minimum sensors for 90-degree turn
+#define LINE_END_THRESHOLD  2       // Maximum sensors for line end
+
+// Detect line pattern with improved accuracy and noise rejection
+LinePattern detect_line_pattern(LineSensorArray *sensors) {
+    int active_count = 0;
+    bool left_edge = false;   // Sensors 0-1
+    bool left_mid = false;    // Sensors 2-3
+    bool center = false;      // Sensors 3-4
+    bool right_mid = false;   // Sensors 4-5
+    bool right_edge = false;  // Sensors 6-7
+    
+    // First normalize all sensor values (0.0-1.0)
+    for (int i = 0; i < 8; i++) {
+        uint16_t range = sensors->calibrated_max[i] - sensors->calibrated_min[i];
+        if (range > 0) {
+            sensors->normalized[i] = (float)(sensors->raw_values[i] - sensors->calibrated_min[i]) / range;
+        } else {
+            sensors->normalized[i] = 0.0f;
+        }
+        
+        // Check if sensor is active using hysteresis
+        if (sensors->normalized[i] > SENSOR_THRESHOLD) {
+            active_count++;
+            // Map sensor to region
+            if (i < 2) left_edge = true;
+            if (i >= 2 && i < 4) left_mid = true;
+            if (i >= 3 && i < 5) center = true;
+            if (i >= 4 && i < 6) right_mid = true;
+            if (i >= 6) right_edge = true;
+        }
+    }
+    
+    sensors->active_sensors = active_count;
+    
+    // Pattern detection with noise rejection
+    if (active_count == 0 || 
+        (center && sensors->normalized[3] + sensors->normalized[4] < LINE_DETECT_MIN)) {
+        return NO_LINE;
+    }
+    
+    // Cross intersection - all regions active with strong center
+    if (active_count >= CROSS_THRESHOLD && 
+        left_edge && right_edge && center &&
+        sensors->normalized[3] + sensors->normalized[4] > SENSOR_THRESHOLD * 2) {
+        return CROSS_INTERSECTION;
+    }
+    
+    // T intersection up - both edges and strong center
+    if (active_count >= T_THRESHOLD && 
+        left_edge && right_edge && center) {
+        return T_INTERSECTION_UP;
+    }
+    
+    // T intersection from sides
+    if (active_count >= T_THRESHOLD && center) {
+        if (left_edge && !right_edge) return T_INTERSECTION_LEFT;
+        if (right_edge && !left_edge) return T_INTERSECTION_RIGHT;
+    }
+    
+    // Y intersection - gradual widening with strong center
+    if (active_count >= T_THRESHOLD && 
+        left_mid && right_mid && center &&
+        !left_edge && !right_edge) {
+        return Y_INTERSECTION;
+    }
+    
+    // 90-degree turns
+    if (active_count >= TURN_THRESHOLD && center) {
+        if (left_edge && !right_edge) return LEFT_TURN_90;
+        if (right_edge && !left_edge) return RIGHT_TURN_90;
+    }
+    
+    // Line end - few active sensors on one side only
+    if (active_count <= LINE_END_THRESHOLD && !center) {
+        if (left_edge || left_mid) return LINE_END;
+        if (right_edge || right_mid) return LINE_END;
+    }
+    
+    // Default: straight line or gentle curve
+    return STRAIGHT_LINE;
+}
+
+// Speed profiles for different path types
+#define SPEED_STRAIGHT    255  // Maximum speed on straight paths
+#define SPEED_CURVE      180  // Medium speed for curves
+#define SPEED_TURN       150  // Slower for sharp turns
+#define SPEED_CREEP      100  // Very slow for precise movements
+#define SEARCH_ANGLE_MAX  45  // Maximum search angle (degrees)
 
 // Global variables
 static volatile RobotState current_state = STOPPED;
 static LineSensorArray sensor_array;
 static PIDController pid_controller;
-static volatile bool core1_ready = false;
 static absolute_time_t last_line_detected_time;
 static int8_t last_direction = 0;
+static float last_known_position = 0.0f;  // Last valid line position
 
 // Mutexes for synchronization between cores
 static mutex_t sensor_mutex;
 static mutex_t state_mutex;
-static mutex_t _motor_mutex; // actual storage for motor mutex
+mutex_t motor_mutex;  // Defined here, declared extern in header
 
-// Shared control is declared in header; ensure we have storage here if not provided by main
-// If main.c defines shared_control this weak definition will be ignored during linking.
-SharedControl shared_control = { .mutex = {}, .pid_output = 0.0f, .new_data = false };
-
-// Provide motor_mutex symbol
-mutex_t motor_mutex;
+// Reference shared_control defined in main.c
+extern SharedControl shared_control;
 
 // Initialize all components
 void init_line_follower(void) {
+    // Initialize all mutexes
     mutex_init(&sensor_mutex);
     mutex_init(&state_mutex);
     mutex_init(&motor_mutex);
-    mutex_init(&shared_control.mutex);
+    
+    // Initialize shared control values
+    mutex_enter_blocking(&shared_control.mutex);
+    shared_control.base_speed = SPEED_CREEP;  // Start with slow speed
+    shared_control.pid_output = 0.0f;
+    shared_control.new_data = false;
+    mutex_exit(&shared_control.mutex);
     
     init_i2c();
     init_motors();
@@ -36,15 +141,10 @@ void init_line_follower(void) {
     init_buttons();
     
     // Initialize PID controller with tuned values
+    // Initialize PID controller with tuned values
     init_pid_controller(&pid_controller, 1.0f, 0.001f, 2.0f);
     
-    // Start core1
-    multicore_launch_core1(core1_main);
-    
-    // Wait for core1 to be ready
-    while (!core1_ready) {
-        tight_loop_contents();
-    }
+    // No need to wait for core1 here - it will be launched by main()
 }
 
 // I2C initialization for ADS1115
@@ -115,19 +215,26 @@ void init_buttons(void) {
     gpio_pull_up(CALIBRATION_BTN);
     gpio_pull_up(START_STOP_BTN);
     
+    // Use the same callback for both buttons
     gpio_set_irq_enabled_with_callback(CALIBRATION_BTN, GPIO_IRQ_EDGE_FALL, true, &button_callback);
-    gpio_set_irq_enabled(START_STOP_BTN, GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled_with_callback(START_STOP_BTN, GPIO_IRQ_EDGE_FALL, true, &button_callback);
 }
 
-// Button interrupt handler
+// Atomic flags for button events
+volatile bool calibration_requested = false;
+volatile bool start_stop_requested = false;
+volatile bool core1_ready = false;
+
+// Button interrupt handler - just sets flags
 void button_callback(uint gpio, uint32_t events) {
     if (gpio == CALIBRATION_BTN) {
-        set_robot_state(CALIBRATING);
+        calibration_requested = true;
     } else if (gpio == START_STOP_BTN) {
-        RobotState current = get_robot_state();
-        set_robot_state(current == RUNNING ? STOPPED : RUNNING);
+        start_stop_requested = true;
     }
 }
+
+
 
 // Read sensors through ADS1115
 void read_line_sensors(LineSensorArray *sensors) {
@@ -164,24 +271,44 @@ void read_line_sensors(LineSensorArray *sensors) {
         // Wait for conversion: at 860 SPS => ~1.16ms; use 2ms to be safe and allow I2C overhead
         sleep_ms(2);
 
-        // Read left conversion
+        // Read left conversion with error handling
         uint8_t reg = ADS1115_REG_CONVERSION;
-        i2c_write_blocking(i2c0, ADS1115_LEFT_ADDR, &reg, 1, false);
-        uint8_t read_bytes_l[2];
-        int rl = i2c_read_blocking(i2c0, ADS1115_LEFT_ADDR, read_bytes_l, 2, false);
-        if (rl < 0) read_bytes_l[0] = read_bytes_l[1] = 0;
-        int16_t signed_l = (int16_t)((read_bytes_l[0] << 8) | read_bytes_l[1]);
-        if (signed_l < 0) signed_l = 0;
-        sensors->raw_values[ch] = (uint16_t)signed_l;
+        uint8_t read_bytes_l[2] = {0, 0};
+        bool success = true;
+        
+        if (i2c_write_blocking(i2c0, ADS1115_LEFT_ADDR, &reg, 1, false) < 0) {
+            success = false;
+        }
+        
+        if (success && i2c_read_blocking(i2c0, ADS1115_LEFT_ADDR, read_bytes_l, 2, false) < 0) {
+            success = false;
+        }
+        
+        if (success) {
+            int16_t signed_l = (int16_t)((read_bytes_l[0] << 8) | read_bytes_l[1]);
+            sensors->raw_values[ch] = (signed_l > 0) ? (uint16_t)signed_l : 0;
+        } else {
+            sensors->raw_values[ch] = sensors->calibrated_min[ch]; // Use min value on error
+        }
 
-        // Read right conversion
-        i2c_write_blocking(i2c1, ADS1115_RIGHT_ADDR, &reg, 1, false);
-        uint8_t read_bytes_r[2];
-        int rr = i2c_read_blocking(i2c1, ADS1115_RIGHT_ADDR, read_bytes_r, 2, false);
-        if (rr < 0) read_bytes_r[0] = read_bytes_r[1] = 0;
-        int16_t signed_r = (int16_t)((read_bytes_r[0] << 8) | read_bytes_r[1]);
-        if (signed_r < 0) signed_r = 0;
-        sensors->raw_values[ch + 4] = (uint16_t)signed_r;
+        // Read right conversion with error handling
+        uint8_t read_bytes_r[2] = {0, 0};
+        success = true;
+        
+        if (i2c_write_blocking(i2c1, ADS1115_RIGHT_ADDR, &reg, 1, false) < 0) {
+            success = false;
+        }
+        
+        if (success && i2c_read_blocking(i2c1, ADS1115_RIGHT_ADDR, read_bytes_r, 2, false) < 0) {
+            success = false;
+        }
+        
+        if (success) {
+            int16_t signed_r = (int16_t)((read_bytes_r[0] << 8) | read_bytes_r[1]);
+            sensors->raw_values[ch + 4] = (signed_r > 0) ? (uint16_t)signed_r : 0;
+        } else {
+            sensors->raw_values[ch + 4] = sensors->calibrated_min[ch + 4]; // Use min value on error
+        }
     }
 
     mutex_exit(&sensor_mutex);
@@ -235,28 +362,62 @@ float calculate_line_position(LineSensorArray *sensors) {
     return weighted_sum / (sum * 3.5f); // Normalize to -1.0 to 1.0
 }
 
-// Handle line lost situation
+// Smart line recovery with systematic search pattern
 void handle_line_lost(void) {
     absolute_time_t current_time = get_absolute_time();
     int64_t time_diff = absolute_time_diff_us(last_line_detected_time, current_time) / 1000;
+    static float search_angle = 0;
+    static bool increasing_angle = true;
+    static bool first_search = true;
     
-    if (time_diff > 2000) { // If line lost for more than 2 seconds
+    if (time_diff > 3000) { // Extended search time
         stop_motors();
         set_robot_state(STOPPED);
+        // Reset search pattern for next time
+        search_angle = 0;
+        increasing_angle = true;
+        first_search = true;
         return;
     }
-    
-    // Continue in last known direction
-    if (last_direction < 0) {
-        // Use motor mutex to avoid racing with core0 motor updates
-        mutex_enter_blocking(&motor_mutex);
-        set_motor_speeds(-100, 100); // Turn left
-        mutex_exit(&motor_mutex);
-    } else if (last_direction > 0) {
-        mutex_enter_blocking(&motor_mutex);
-        set_motor_speeds(100, -100); // Turn right
-        mutex_exit(&motor_mutex);
+
+    // Initialize search from last known position
+    if (first_search) {
+        search_angle = last_known_position * 15.0f; // Convert position (-1..1) to initial angle
+        first_search = false;
     }
+
+    // Systematic search pattern
+    mutex_enter_blocking(&motor_mutex);
+    
+    // Calculate turn speeds based on current search angle
+    float turn_intensity = fabsf(search_angle) / SEARCH_ANGLE_MAX;
+    int16_t inner_speed = (int16_t)(SPEED_CREEP * (1.0f - turn_intensity));
+    int16_t outer_speed = (int16_t)(SPEED_CREEP);
+
+    if (search_angle < 0) {
+        // Search left
+        set_motor_speeds(-inner_speed, outer_speed);
+    } else {
+        // Search right
+        set_motor_speeds(outer_speed, -inner_speed);
+    }
+    mutex_exit(&motor_mutex);
+
+    // Update search pattern
+    if (increasing_angle) {
+        search_angle += 5.0f; // Increment by 5 degrees
+        if (search_angle >= SEARCH_ANGLE_MAX) {
+            increasing_angle = false;
+        }
+    } else {
+        search_angle -= 5.0f; // Decrement by 5 degrees
+        if (search_angle <= -SEARCH_ANGLE_MAX) {
+            increasing_angle = true;
+        }
+    }
+
+    // Small delay to allow smooth movement
+    sleep_ms(50);
 }
 
 // Set motor speeds (-255 to 255)
@@ -302,211 +463,146 @@ void init_pid_controller(PIDController *pid, float kp, float ki, float kd) {
     pid->integral = 0.0f;
 }
 
-// Calculate PID output
+// High-performance PID controller with advanced features
 float calculate_pid(PIDController *pid, float error) {
-    pid->integral += error;
+    // Deadband to prevent oscillation on small errors
+    const float DEAD_BAND = 0.02f;
+    if (fabsf(error) < DEAD_BAND) {
+        error = 0.0f;
+    }
+
+    // Proportional term
+    float p_term = pid->kp * error;
+
+    // Derivative term with filtering to reduce noise
     float derivative = error - pid->previous_error;
-    
-    // Anti-windup
-    if (pid->integral > 100.0f) pid->integral = 100.0f;
-    if (pid->integral < -100.0f) pid->integral = -100.0f;
-    
-    float output = (pid->kp * error) + 
-                  (pid->ki * pid->integral) + 
-                  (pid->kd * derivative);
-    
+    static float prev_derivative = 0.0f;
+    const float DERIVATIVE_FILTER = 0.8f;  // Low-pass filter coefficient
+    derivative = DERIVATIVE_FILTER * derivative + (1.0f - DERIVATIVE_FILTER) * prev_derivative;
+    prev_derivative = derivative;
+    float d_term = pid->kd * derivative;
+
+    // Integral term with advanced anti-windup
+    float potential_output = p_term + d_term;
+    const float OUTPUT_LIMIT = 95.0f;  // Slightly less than max to allow headroom
+
+    // Only integrate if output won't be saturated (back-calculation anti-windup)
+    if (fabsf(potential_output) < OUTPUT_LIMIT) {
+        pid->integral += pid->ki * error;
+    } else {
+        // Back-calculate to prevent windup
+        float back_calc = (potential_output > 0 ? OUTPUT_LIMIT - potential_output : -OUTPUT_LIMIT - potential_output);
+        pid->integral += pid->ki * back_calc;
+    }
+
+    // Clamp integral to prevent excessive accumulation
+    const float INTEGRAL_LIMIT = 80.0f;
+    if (pid->integral > INTEGRAL_LIMIT) pid->integral = INTEGRAL_LIMIT;
+    if (pid->integral < -INTEGRAL_LIMIT) pid->integral = -INTEGRAL_LIMIT;
+
+    // Calculate final output
+    float output = p_term + pid->integral + d_term;
+
+    // Output limiting
+    if (output > OUTPUT_LIMIT) output = OUTPUT_LIMIT;
+    if (output < -OUTPUT_LIMIT) output = -OUTPUT_LIMIT;
+
+    // Store error for next iteration
     pid->previous_error = error;
+
     return output;
 }
 
-// Core 1 main function
+// High-performance Core 1 main function with optimized timing
 void core1_main(void) {
     core1_ready = true;
-    
+
+    // Set up high-priority execution for real-time sensor processing
+    // Use tight timing loop for maximum responsiveness
+    absolute_time_t next_update = get_absolute_time();
+
     while (1) {
+        // Execute sensor handler at fixed high frequency (2kHz for optimal performance)
         core1_sensor_handler();
-        sleep_us(10); // Small delay to prevent overwhelming the system
+
+        // Fixed update rate for consistent timing (500us = 2kHz)
+        // This provides optimal balance between responsiveness and CPU usage
+        next_update = delayed_by_us(next_update, 500);
+        sleep_until(next_update);
     }
 }
 
 // Core 1 sensor handling
 void core1_sensor_handler(void) {
+    // Read and analyze sensor data
     read_line_sensors(&sensor_array);
     float position = calculate_line_position(&sensor_array);
+    LinePattern pattern = detect_line_pattern(&sensor_array);
+    sensor_array.pattern = pattern;  // Store for debugging/telemetry
     
     if (position != 999.0f) {
         last_line_detected_time = get_absolute_time();
-        last_direction = position > 0 ? 1 : -1;
+        last_known_position = position;
         
+        // Base speed selection based on pattern and position
+        uint16_t base_speed;
+        float position_abs = fabsf(position);
+        
+        switch (pattern) {
+            case CROSS_INTERSECTION:
+            case T_INTERSECTION_UP:
+                // Maintain speed through straight intersections
+                base_speed = SPEED_STRAIGHT;
+                // Center bias for PID
+                position *= 0.7f;
+                break;
+                
+            case T_INTERSECTION_LEFT:
+            case T_INTERSECTION_RIGHT:
+            case Y_INTERSECTION:
+                // Slow down for side intersections
+                base_speed = SPEED_TURN;
+                break;
+                
+            case LEFT_TURN_90:
+            case RIGHT_TURN_90:
+                // Very slow for sharp turns
+                base_speed = SPEED_CREEP;
+                break;
+                
+            case LINE_END:
+                // Stop at end
+                stop_motors();
+                set_robot_state(STOPPED);
+                return;
+                
+            default:  // STRAIGHT_LINE or gentle curves
+                if (position_abs < 0.2f) {
+                    base_speed = SPEED_STRAIGHT;
+                } else if (position_abs < 0.5f) {
+                    base_speed = SPEED_CURVE;
+                } else {
+                    base_speed = SPEED_TURN;
+                }
+                break;
+        }
+        
+        // Calculate PID with adjusted position
         float pid_output = calculate_pid(&pid_controller, position);
         
-        // Share PID output with Core 0
+        // Share data with Core 0
         mutex_enter_blocking(&shared_control.mutex);
         shared_control.pid_output = pid_output;
+        shared_control.base_speed = base_speed;
         shared_control.new_data = true;
         mutex_exit(&shared_control.mutex);
     } else {
-        if (get_robot_state() == RUNNING) {
-            handle_line_lost();
-        }
+        set_robot_state(LINE_LOST);
+        handle_line_lost();
     }
 }
 
-// Handle intersection detection
-// Detect the current line pattern with detailed path analysis
-LinePattern detect_line_pattern(LineSensorArray *sensors) {
-    int active_sensors = 0;
-    bool left_edge = false;    // Sensors 0-1
-    bool left_mid = false;     // Sensors 2-3
-    bool center = false;       // Sensors 3-4
-    bool right_mid = false;    // Sensors 4-5
-    bool right_edge = false;   // Sensors 6-7
-    
-    // Calculate threshold and check each sensor region
-    for (int i = 0; i < 8; i++) {
-        uint16_t threshold = (sensors->calibrated_max[i] + sensors->calibrated_min[i]) / 2;
-        bool is_active = sensors->raw_values[i] > threshold;
-        
-        if (is_active) {
-            active_sensors++;
-            if (i < 2) left_edge = true;
-            if (i >= 2 && i < 4) left_mid = true;
-            if (i >= 3 && i < 5) center = true;
-            if (i >= 4 && i < 6) right_mid = true;
-            if (i >= 6) right_edge = true;
-        }
-    }
-    
-    sensors->active_sensors = active_sensors;
-    
-    // Advanced pattern detection logic
-    if (active_sensors == 0) {
-        return NO_LINE;
-    }
-    // Cross intersection (all regions active)
-    else if (active_sensors >= 7 && left_edge && right_edge && center) {
-        return CROSS_INTERSECTION;
-    }
-    // T intersection facing up (both sides and center active)
-    else if (active_sensors >= 5 && left_edge && right_edge && center) {
-        return T_INTERSECTION_UP;
-    }
-    // T intersection from left (right and center active, strong left signal)
-    else if (active_sensors >= 4 && left_edge && center && !right_edge) {
-        return T_INTERSECTION_LEFT;
-    }
-    // T intersection from right (left and center active, strong right signal)
-    else if (active_sensors >= 4 && right_edge && center && !left_edge) {
-        return T_INTERSECTION_RIGHT;
-    }
-    // Y intersection (gradual widening of active sensors)
-    else if (active_sensors >= 5 && left_mid && right_mid && center) {
-        return Y_INTERSECTION;
-    }
-    // 90-degree left turn
-    else if (active_sensors >= 3 && left_edge && !right_edge && center) {
-        return LEFT_TURN_90;
-    }
-    // 90-degree right turn
-    else if (active_sensors >= 3 && right_edge && !left_edge && center) {
-        return RIGHT_TURN_90;
-    }
-    // Line end detection
-    else if (active_sensors <= 2 && (left_edge || right_edge) && !center) {
-        return LINE_END;
-    }
-    
-    return STRAIGHT_LINE;
-}
 
-// Handle different line patterns with middle path preference
-void handle_intersection(LineSensorArray *sensors) {
-    sensors->pattern = detect_line_pattern(sensors);
-    
-    switch (sensors->pattern) {
-        case CROSS_INTERSECTION:
-            // Always choose middle (straight) path at crossroads
-            set_motor_speeds(200, 200);  // Full speed ahead
-            while (sensors->active_sensors > 4) {  // Wait until we're past the intersection
-                read_line_sensors(sensors);
-                sleep_ms(1);
-            }
-            break;
-            
-        case T_INTERSECTION_UP:
-            // At T junction, go straight (middle path)
-            set_motor_speeds(200, 200);
-            sleep_ms(200);  // Cross intersection quickly
-            break;
-            
-        case T_INTERSECTION_LEFT:
-        case T_INTERSECTION_RIGHT:
-            // For side T-intersections, slow down and continue straight
-            set_motor_speeds(150, 150);
-            sleep_ms(150);
-            break;
-            
-        case Y_INTERSECTION:
-            // At Y splits, adjust to favor middle path
-            // Slow down and use PID with center sensor bias
-            set_motor_speeds(150, 150);
-            while (sensors->active_sensors > 3) {
-                float position = calculate_line_position(sensors);
-                // Apply a center-seeking bias to the position
-                position *= 0.7; // Reduce the impact of side sensors
-                float pid_output = calculate_pid(&pid_controller, position);
-                int16_t left_speed = 150 - (int16_t)pid_output;
-                int16_t right_speed = 150 + (int16_t)pid_output;
-                set_motor_speeds(left_speed, right_speed);
-                read_line_sensors(sensors);
-                sleep_ms(1);
-            }
-            break;
-            
-        case LEFT_TURN_90:
-            if (!is_middle_path_available(sensors)) {
-                // Only turn left if no middle path
-                set_motor_speeds(-150, 150);
-                while (!(sensors->raw_values[3] > sensors->calibrated_min[3] || 
-                        sensors->raw_values[4] > sensors->calibrated_min[4])) {
-                    read_line_sensors(sensors);
-                    sleep_ms(1);
-                }
-            }
-            break;
-            
-        case RIGHT_TURN_90:
-            if (!is_middle_path_available(sensors)) {
-                // Only turn right if no middle path
-                set_motor_speeds(150, -150);
-                while (!(sensors->raw_values[3] > sensors->calibrated_min[3] || 
-                        sensors->raw_values[4] > sensors->calibrated_min[4])) {
-                    read_line_sensors(sensors);
-                    sleep_ms(1);
-                }
-            }
-            break;
-            
-        case LINE_END:
-            set_robot_state(STOPPED);
-            break;
-            
-        case NO_LINE:
-            handle_line_lost();
-            break;
-            
-        case STRAIGHT_LINE:
-            // Normal line following continues
-            break;
-    }
-}
-
-// Helper function to check if a middle path is available
-bool is_middle_path_available(LineSensorArray *sensors) {
-    // Check if center sensors detect a strong line
-    return (sensors->raw_values[3] > (sensors->calibrated_max[3] + sensors->calibrated_min[3]) / 2 ||
-            sensors->raw_values[4] > (sensors->calibrated_max[4] + sensors->calibrated_min[4]) / 2);
-}
 
 // Set robot state with mutex protection
 void set_robot_state(RobotState new_state) {
