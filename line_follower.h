@@ -14,9 +14,24 @@
 #define TURN_ASYMMETRY      1.2f      // Inner wheel reduction factor for turns
 #define LINE_DETECT_THRESH  0.2f      // Threshold for line detection
 #define LINE_POSITION_NORM  3.5f      // Position normalization factor
-#define MAX_SEARCH_TIME_MS  3000      // Maximum line search time
+#define MAX_SEARCH_TIME_MS  10000     // Maximum line search time
 #define SEARCH_ANGLE_STEP   5.0f      // Search pattern angle increment
 #define PWM_MAX            255        // Maximum PWM value
+
+// Pattern detection thresholds
+#define SENSOR_THRESHOLD     0.5f    // Threshold for sensor activation (normalized)
+#define LINE_DETECT_MIN      0.2f    // Minimum value to consider line detected
+#define CROSS_THRESHOLD      7       // Minimum sensors for cross intersection
+#define T_THRESHOLD         5       // Minimum sensors for T intersection
+#define TURN_THRESHOLD      3       // Minimum sensors for 90-degree turn
+#define LINE_END_THRESHOLD  2       // Maximum sensors for line end
+
+// Speed profiles for different path types
+#define SPEED_STRAIGHT    255  // Maximum speed on straight paths
+#define SPEED_CURVE      180  // Medium speed for curves
+#define SPEED_TURN       150  // Slower for sharp turns
+#define SPEED_CREEP      100  // Very slow for precise movements
+#define SEARCH_ANGLE_MAX  45  // Maximum search angle (degrees)
 #define MIN_SPEED_HIGH     60         // Minimum speed for high base_speed
 #define MIN_SPEED_LOW      40         // Minimum speed for low base_speed
 #define HIGH_SPEED_THRESH  180        // Threshold for high/low speed behavior
@@ -43,6 +58,10 @@
 #define ADS1115_RIGHT_ADDR 0x49  // ADDR -> VDD (1001001)
 #define ADS1115_REG_CONVERSION 0x00
 #define ADS1115_REG_CONFIG 0x01
+
+#define KP 1.0f
+#define KI 0.001f
+#define KD 2.0f
 
 // Line pattern types
 typedef enum {
@@ -73,7 +92,29 @@ typedef struct {
     float kd;
     float previous_error;
     float integral;
+    float derivative;
 } PIDController;
+
+// Intersection action types
+typedef enum {
+    NO_ACTION,
+    FORWARD_CROSS,     // Go straight through intersection
+    SLOW_FORWARD,      // Slow down and continue straight
+    TURN_LEFT,         // Make a left turn
+    TURN_RIGHT,        // Make a right turn
+    Y_SPLIT_CENTER     // Handle Y intersection with center bias
+} IntersectionAction;
+
+// Shared control structure for inter-core communication
+typedef struct {
+    mutex_t mutex;
+    float pid_output;
+    uint16_t base_speed;      // Dynamic base speed based on path type
+    bool new_data;
+    IntersectionAction intersection_action;  // Current intersection handling request
+    bool intersection_active;                // True while handling an intersection
+    LinePattern current_pattern;            // Current detected line pattern
+} SharedControl;
 
 // Line sensor data structure
 typedef struct {
@@ -86,12 +127,9 @@ typedef struct {
     float normalized[8];    // Normalized sensor values (0.0-1.0)
 } LineSensorArray;
 
-// Function declarations
-
 // Initialization functions
 void init_line_follower(void);
 void init_motors(void);
-void init_sensors(void);
 void init_i2c(void);
 void init_buttons(void);
 
@@ -119,27 +157,6 @@ void core1_sensor_handler(void);
 // State management
 void set_robot_state(RobotState new_state);
 RobotState get_robot_state(void);
-
-// Intersection action types
-typedef enum {
-    NO_ACTION,
-    FORWARD_CROSS,     // Go straight through intersection
-    SLOW_FORWARD,      // Slow down and continue straight
-    TURN_LEFT,         // Make a left turn
-    TURN_RIGHT,        // Make a right turn
-    Y_SPLIT_CENTER     // Handle Y intersection with center bias
-} IntersectionAction;
-
-// Shared control structure for inter-core communication
-typedef struct {
-    mutex_t mutex;
-    float pid_output;
-    uint16_t base_speed;      // Dynamic base speed based on path type
-    bool new_data;
-    IntersectionAction intersection_action;  // Current intersection handling request
-    bool intersection_active;                // True while handling an intersection
-    LinePattern current_pattern;            // Current detected line pattern
-} SharedControl;
 
 extern SharedControl shared_control;
 

@@ -35,26 +35,26 @@ void core0_motor_control() {
 
         if (has_new_data && get_robot_state() == RUNNING) {
             // Scale PID correction based on current base_speed
-            float correction_scale = (float)base_speed / 255.0f; // Normalize to max speed
-            int16_t correction = (int16_t)(pid_output * 100.0f * correction_scale);
+            float correction_scale = (float)base_speed / PWM_MAX; // Normalize to max speed
+            int16_t correction = (int16_t)(pid_output * PID_SCALE * correction_scale);
 
             // Apply asymmetric correction for better turning
             int16_t left_speed, right_speed;
             if (correction > 0) {
                 // Turning right - slow down right motor more
                 left_speed = base_speed;
-                right_speed = base_speed - (correction * 1.2f); // 20% stronger inner wheel reduction
+                right_speed = base_speed - (correction * TURN_ASYMMETRY); // 20% stronger inner wheel reduction
             } else {
                 // Turning left - slow down left motor more
-                left_speed = base_speed + (correction * 1.2f); // 20% stronger inner wheel reduction
+                left_speed = base_speed + (correction * TURN_ASYMMETRY); // 20% stronger inner wheel reduction
                 right_speed = base_speed;
             }
             // Dynamic minimum speed to prevent stalling
-            int16_t min_speed = base_speed > 180 ? 60 : 40;
+            int16_t min_speed = base_speed > HIGH_SPEED_THRESH ? MIN_SPEED_HIGH : MIN_SPEED_LOW;
 
             // Constrain motor speeds with dynamic minimum
-            left_speed = constrain(left_speed, min_speed, 255);
-            right_speed = constrain(right_speed, min_speed, 255);
+            left_speed = constrain(left_speed, min_speed, PWM_MAX);
+            right_speed = constrain(right_speed, min_speed, PWM_MAX);
 
             // Add acceleration limiting
             static int16_t prev_left_speed = 0;

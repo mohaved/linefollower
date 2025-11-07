@@ -3,20 +3,34 @@
 #include <string.h>
 #include <math.h>
 
+#include "line_follower.h"
+
 #include "pico/stdlib.h"
 #include "pico/time.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
 #include "hardware/i2c.h"
-#include "line_follower.h"
 
-// Pattern detection thresholds
-#define SENSOR_THRESHOLD     0.5f    // Threshold for sensor activation (normalized)
-#define LINE_DETECT_MIN      0.2f    // Minimum value to consider line detected
-#define CROSS_THRESHOLD      7       // Minimum sensors for cross intersection
-#define T_THRESHOLD         5       // Minimum sensors for T intersection
-#define TURN_THRESHOLD      3       // Minimum sensors for 90-degree turn
-#define LINE_END_THRESHOLD  2       // Maximum sensors for line end
+// Global variables
+static volatile RobotState current_state = STOPPED;
+static LineSensorArray sensor_array;
+static PIDController pid_controller;
+static absolute_time_t last_line_detected_time;
+static int8_t last_direction = 0;
+static float last_known_position = 0.0f;  // Last valid line position
+
+// Mutexes for synchronization between cores
+static mutex_t sensor_mutex;
+static mutex_t state_mutex;
+mutex_t motor_mutex;  // Defined here, declared extern in header
+
+// Reference shared_control defined in main.c
+extern SharedControl shared_control;
+
+// Atomic flags for button events
+volatile bool calibration_requested = false;
+volatile bool start_stop_requested = false;
+volatile bool core1_ready = false;
 
 // Detect line pattern with improved accuracy and noise rejection
 LinePattern detect_line_pattern(LineSensorArray *sensors) {
@@ -98,29 +112,6 @@ LinePattern detect_line_pattern(LineSensorArray *sensors) {
     return STRAIGHT_LINE;
 }
 
-// Speed profiles for different path types
-#define SPEED_STRAIGHT    255  // Maximum speed on straight paths
-#define SPEED_CURVE      180  // Medium speed for curves
-#define SPEED_TURN       150  // Slower for sharp turns
-#define SPEED_CREEP      100  // Very slow for precise movements
-#define SEARCH_ANGLE_MAX  45  // Maximum search angle (degrees)
-
-// Global variables
-static volatile RobotState current_state = STOPPED;
-static LineSensorArray sensor_array;
-static PIDController pid_controller;
-static absolute_time_t last_line_detected_time;
-static int8_t last_direction = 0;
-static float last_known_position = 0.0f;  // Last valid line position
-
-// Mutexes for synchronization between cores
-static mutex_t sensor_mutex;
-static mutex_t state_mutex;
-mutex_t motor_mutex;  // Defined here, declared extern in header
-
-// Reference shared_control defined in main.c
-extern SharedControl shared_control;
-
 // Initialize all components
 void init_line_follower(void) {
     // Initialize all mutexes
@@ -137,12 +128,10 @@ void init_line_follower(void) {
     
     init_i2c();
     init_motors();
-    init_sensors();
     init_buttons();
     
     // Initialize PID controller with tuned values
-    // Initialize PID controller with tuned values
-    init_pid_controller(&pid_controller, 1.0f, 0.001f, 2.0f);
+    init_pid_controller(&pid_controller, KP, KI, KD);
     
     // No need to wait for core1 here - it will be launched by main()
 }
@@ -157,7 +146,6 @@ void init_i2c(void) {
     gpio_pull_up(I2C_SCL_PIN);
 
     // Initialize secondary I2C (i2c1) on separate pins to parallelize ADC reads
-    // NOTE: Choose pins that don't conflict with motors/buttons. Using 8/9 by default.
     i2c_init(i2c1, 400000);
     gpio_set_function(I2C1_SDA_PIN, GPIO_FUNC_I2C);
     gpio_set_function(I2C1_SCL_PIN, GPIO_FUNC_I2C);
@@ -198,12 +186,6 @@ void init_motors(void) {
     pwm_set_gpio_level(MOTOR_RIGHT_PWM2, 0);
 }
 
-// Initialize sensors and ADS1115
-void init_sensors(void) {
-    // Nothing to write globally here for single-shot mode.
-    // We'll configure each channel on-demand in read_line_sensors().
-}
-
 // Initialize buttons with interrupt
 void init_buttons(void) {
     gpio_init(CALIBRATION_BTN);
@@ -220,11 +202,6 @@ void init_buttons(void) {
     gpio_set_irq_enabled_with_callback(START_STOP_BTN, GPIO_IRQ_EDGE_FALL, true, &button_callback);
 }
 
-// Atomic flags for button events
-volatile bool calibration_requested = false;
-volatile bool start_stop_requested = false;
-volatile bool core1_ready = false;
-
 // Button interrupt handler - just sets flags
 void button_callback(uint gpio, uint32_t events) {
     if (gpio == CALIBRATION_BTN) {
@@ -234,19 +211,9 @@ void button_callback(uint gpio, uint32_t events) {
     }
 }
 
-
-
 // Read sensors through ADS1115
 void read_line_sensors(LineSensorArray *sensors) {
     mutex_enter_blocking(&sensor_mutex);
-
-    // To get lowest-latency sampling with two ADS1115 devices, we'll:
-    // 1) Configure both ADS1115s for single-shot conversion on the same channel index
-    // 2) Start conversions on both devices nearly simultaneously (write config to both i2c buses)
-    // 3) Wait the required conversion time for the chosen data rate
-    // 4) Read conversion registers from both devices
-    // Repeat for channels 0..3. This effectively parallelizes ADC work and halves the total time vs
-    // doing both devices sequentially on a single bus.
 
     // ADS1115 configuration constants for fastest sampling
     const uint16_t PGA_4_096 = (0x1 << 9); // ±4.096V
@@ -348,7 +315,7 @@ float calculate_line_position(LineSensorArray *sensors) {
             value = (float)(sensors->raw_values[i] - sensors->calibrated_min[i]) / (float)denom;
         }
         
-        if (value > 0.2f) { // Threshold for line detection
+        if (value > LINE_DETECT_THRESH) { // Threshold for line detection
             weighted_sum += value * (i - 3.5f);
             sum += value;
             line_detected = true;
@@ -359,7 +326,7 @@ float calculate_line_position(LineSensorArray *sensors) {
         return 999.0f; // Line lost indicator
     }
     
-    return weighted_sum / (sum * 3.5f); // Normalize to -1.0 to 1.0
+    return weighted_sum / (sum * LINE_POSITION_NORM); // Normalize to -1.0 to 1.0
 }
 
 // Smart line recovery with systematic search pattern
@@ -372,7 +339,7 @@ void handle_line_lost(void) {
 
     printf("DEBUG: Line lost for %lld ms\n", time_diff);
 
-    if (time_diff > 10000) { // Extended search time - 10 seconds
+    if (time_diff > MAX_SEARCH_TIME_MS) { // Extended search time - 10 seconds
         printf("DEBUG: No line found for 10 seconds, stopping robot\n");
         stop_motors();
         set_robot_state(STOPPED);
@@ -408,12 +375,12 @@ void handle_line_lost(void) {
 
     // Update search pattern
     if (increasing_angle) {
-        search_angle += 5.0f; // Increment by 5 degrees
+        search_angle += SEARCH_ANGLE_STEP; // Increment by defined step
         if (search_angle >= SEARCH_ANGLE_MAX) {
             increasing_angle = false;
         }
     } else {
-        search_angle -= 5.0f; // Decrement by 5 degrees
+        search_angle -= SEARCH_ANGLE_STEP; // Decrement by defined step
         if (search_angle <= -SEARCH_ANGLE_MAX) {
             increasing_angle = true;
         }
@@ -464,6 +431,7 @@ void init_pid_controller(PIDController *pid, float kp, float ki, float kd) {
     pid->kd = kd;
     pid->previous_error = 0.0f;
     pid->integral = 0.0f;
+    pid->derivative = 0.0f;
 }
 
 // High-performance PID controller with advanced features
@@ -479,10 +447,9 @@ float calculate_pid(PIDController *pid, float error) {
 
     // Derivative term with filtering to reduce noise
     float derivative = error - pid->previous_error;
-    static float prev_derivative = 0.0f;
     const float DERIVATIVE_FILTER = 0.8f;  // Low-pass filter coefficient
-    derivative = DERIVATIVE_FILTER * derivative + (1.0f - DERIVATIVE_FILTER) * prev_derivative;
-    prev_derivative = derivative;
+    derivative = DERIVATIVE_FILTER * derivative + (1.0f - DERIVATIVE_FILTER) * pid->derivative;
+    pid->derivative = derivative;
     float d_term = pid->kd * derivative;
 
     // Integral term with advanced anti-windup
@@ -604,8 +571,6 @@ void core1_sensor_handler(void) {
         handle_line_lost();
     }
 }
-
-
 
 // Set robot state with mutex protection
 void set_robot_state(RobotState new_state) {
