@@ -3,6 +3,7 @@
 
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
+#include "pico/mutex.h"
 #include "hardware/i2c.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
@@ -37,17 +38,20 @@
 #define HIGH_SPEED_THRESH  180        // Threshold for high/low speed behavior
 
 // Pin definitions
-#define I2C_SDA_PIN 0
-#define I2C_SCL_PIN 1
-// Optional second I2C bus (useful to parallelize ADS1115 reads)
-#define I2C1_SDA_PIN 8
-#define I2C1_SCL_PIN 9
+// Motor control pins for TB6612FNG
+#define MOTOR_LEFT_AIN1  2  // Left motor direction 1
+#define MOTOR_LEFT_AIN2  3  // Left motor direction 2
+#define MOTOR_RIGHT_BIN1 4  // Right motor direction 1
+#define MOTOR_RIGHT_BIN2 5  // Right motor direction 2
+#define MOTOR_LEFT_PWMA  6  // Left motor PWM speed
+#define MOTOR_RIGHT_PWMB 7  // Right motor PWM speed
+#define MOTOR_STBY       8  // Standby pin (must be high to enable motors)
 
-// Motor control PWM pins for TC1508A
-#define MOTOR_LEFT_PWM1  2  // Left motor forward
-#define MOTOR_LEFT_PWM2  3  // Left motor backward
-#define MOTOR_RIGHT_PWM1 4  // Right motor forward
-#define MOTOR_RIGHT_PWM2 5  // Right motor backward
+#define I2C_SDA_PIN 10
+#define I2C_SCL_PIN 11
+// Optional second I2C bus (useful to parallelize ADS1115 reads)
+#define I2C1_SDA_PIN 12
+#define I2C1_SCL_PIN 13
 
 // Button pins
 #define CALIBRATION_BTN 14

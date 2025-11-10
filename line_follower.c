@@ -153,37 +153,46 @@ void init_i2c(void) {
     gpio_pull_up(I2C1_SCL_PIN);
 }
 
-// Initialize motors with PWM
+// Initialize motors for TB6612FNG
 void init_motors(void) {
-    // Configure PWM for all motor pins
-    gpio_set_function(MOTOR_LEFT_PWM1, GPIO_FUNC_PWM);
-    gpio_set_function(MOTOR_LEFT_PWM2, GPIO_FUNC_PWM);
-    gpio_set_function(MOTOR_RIGHT_PWM1, GPIO_FUNC_PWM);
-    gpio_set_function(MOTOR_RIGHT_PWM2, GPIO_FUNC_PWM);
-    
-    // Get PWM slices for each pin
-    uint slice_left1 = pwm_gpio_to_slice_num(MOTOR_LEFT_PWM1);
-    uint slice_left2 = pwm_gpio_to_slice_num(MOTOR_LEFT_PWM2);
-    uint slice_right1 = pwm_gpio_to_slice_num(MOTOR_RIGHT_PWM1);
-    uint slice_right2 = pwm_gpio_to_slice_num(MOTOR_RIGHT_PWM2);
-    
-    // Set PWM wrap value for all slices (255 for 8-bit resolution)
-    pwm_set_wrap(slice_left1, 255);
-    pwm_set_wrap(slice_left2, 255);
-    pwm_set_wrap(slice_right1, 255);
-    pwm_set_wrap(slice_right2, 255);
-    
-    // Enable all PWM slices
-    pwm_set_enabled(slice_left1, true);
-    pwm_set_enabled(slice_left2, true);
-    pwm_set_enabled(slice_right1, true);
-    pwm_set_enabled(slice_right2, true);
-    
-    // Initialize all PWM outputs to 0
-    pwm_set_gpio_level(MOTOR_LEFT_PWM1, 0);
-    pwm_set_gpio_level(MOTOR_LEFT_PWM2, 0);
-    pwm_set_gpio_level(MOTOR_RIGHT_PWM1, 0);
-    pwm_set_gpio_level(MOTOR_RIGHT_PWM2, 0);
+    // Configure direction pins as GPIO outputs
+    gpio_init(MOTOR_LEFT_AIN1);
+    gpio_init(MOTOR_LEFT_AIN2);
+    gpio_init(MOTOR_RIGHT_BIN1);
+    gpio_init(MOTOR_RIGHT_BIN2);
+    gpio_init(MOTOR_STBY);
+
+    gpio_set_dir(MOTOR_LEFT_AIN1, GPIO_OUT);
+    gpio_set_dir(MOTOR_LEFT_AIN2, GPIO_OUT);
+    gpio_set_dir(MOTOR_RIGHT_BIN1, GPIO_OUT);
+    gpio_set_dir(MOTOR_RIGHT_BIN2, GPIO_OUT);
+    gpio_set_dir(MOTOR_STBY, GPIO_OUT);
+
+    // Configure PWM pins for speed control
+    gpio_set_function(MOTOR_LEFT_PWMA, GPIO_FUNC_PWM);
+    gpio_set_function(MOTOR_RIGHT_PWMB, GPIO_FUNC_PWM);
+
+    // Get PWM slices for speed pins
+    uint slice_left = pwm_gpio_to_slice_num(MOTOR_LEFT_PWMA);
+    uint slice_right = pwm_gpio_to_slice_num(MOTOR_RIGHT_PWMB);
+
+    // Set PWM wrap value (255 for 8-bit resolution)
+    pwm_set_wrap(slice_left, 255);
+    pwm_set_wrap(slice_right, 255);
+
+    // Enable PWM slices
+    pwm_set_enabled(slice_left, true);
+    pwm_set_enabled(slice_right, true);
+
+    // Initialize all outputs to 0 (motors stopped)
+    gpio_put(MOTOR_LEFT_AIN1, 0);
+    gpio_put(MOTOR_LEFT_AIN2, 0);
+    gpio_put(MOTOR_RIGHT_BIN1, 0);
+    gpio_put(MOTOR_RIGHT_BIN2, 0);
+    gpio_put(MOTOR_STBY, 1);  // Enable motors (active high)
+
+    pwm_set_gpio_level(MOTOR_LEFT_PWMA, 0);
+    pwm_set_gpio_level(MOTOR_RIGHT_PWMB, 0);
 }
 
 // Initialize buttons with interrupt
@@ -390,7 +399,7 @@ void handle_line_lost(void) {
     sleep_ms(50);
 }
 
-// Set motor speeds (-255 to 255)
+// Set motor speeds (-255 to 255) for TB6612FNG
 void set_motor_speeds(int16_t left_speed, int16_t right_speed) {
     // Guard and clamp
     if (left_speed > 255) left_speed = 255;
@@ -400,22 +409,40 @@ void set_motor_speeds(int16_t left_speed, int16_t right_speed) {
 
     // Ensure single atomic update by caller using motor_mutex when needed.
 
-    // Left motor
-    if (left_speed >= 0) {
-        pwm_set_gpio_level(MOTOR_LEFT_PWM1, (uint32_t)left_speed);
-        pwm_set_gpio_level(MOTOR_LEFT_PWM2, 0);
+    // Left motor control
+    if (left_speed > 0) {
+        // Forward: AIN1=1, AIN2=0, PWMA=speed
+        gpio_put(MOTOR_LEFT_AIN1, 1);
+        gpio_put(MOTOR_LEFT_AIN2, 0);
+        pwm_set_gpio_level(MOTOR_LEFT_PWMA, (uint16_t)left_speed);
+    } else if (left_speed < 0) {
+        // Backward: AIN1=0, AIN2=1, PWMA=speed
+        gpio_put(MOTOR_LEFT_AIN1, 0);
+        gpio_put(MOTOR_LEFT_AIN2, 1);
+        pwm_set_gpio_level(MOTOR_LEFT_PWMA, (uint16_t)(-left_speed));
     } else {
-        pwm_set_gpio_level(MOTOR_LEFT_PWM1, 0);
-        pwm_set_gpio_level(MOTOR_LEFT_PWM2, (uint32_t)(-left_speed));
+        // Stop: AIN1=0, AIN2=0, PWMA=0
+        gpio_put(MOTOR_LEFT_AIN1, 0);
+        gpio_put(MOTOR_LEFT_AIN2, 0);
+        pwm_set_gpio_level(MOTOR_LEFT_PWMA, 0);
     }
-    
-    // Right motor
-    if (right_speed >= 0) {
-        pwm_set_gpio_level(MOTOR_RIGHT_PWM1, (uint32_t)right_speed);
-        pwm_set_gpio_level(MOTOR_RIGHT_PWM2, 0);
+
+    // Right motor control
+    if (right_speed > 0) {
+        // Forward: BIN1=1, BIN2=0, PWMB=speed
+        gpio_put(MOTOR_RIGHT_BIN1, 1);
+        gpio_put(MOTOR_RIGHT_BIN2, 0);
+        pwm_set_gpio_level(MOTOR_RIGHT_PWMB, (uint16_t)right_speed);
+    } else if (right_speed < 0) {
+        // Backward: BIN1=0, BIN2=1, PWMB=speed
+        gpio_put(MOTOR_RIGHT_BIN1, 0);
+        gpio_put(MOTOR_RIGHT_BIN2, 1);
+        pwm_set_gpio_level(MOTOR_RIGHT_PWMB, (uint16_t)(-right_speed));
     } else {
-        pwm_set_gpio_level(MOTOR_RIGHT_PWM1, 0);
-        pwm_set_gpio_level(MOTOR_RIGHT_PWM2, (uint32_t)(-right_speed));
+        // Stop: BIN1=0, BIN2=0, PWMB=0
+        gpio_put(MOTOR_RIGHT_BIN1, 0);
+        gpio_put(MOTOR_RIGHT_BIN2, 0);
+        pwm_set_gpio_level(MOTOR_RIGHT_PWMB, 0);
     }
 }
 

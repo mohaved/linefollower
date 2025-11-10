@@ -16,6 +16,8 @@ static inline int16_t constrain(int16_t val, int16_t min, int16_t max) {
     return val;
 }
 
+
+
 // Shared data structure between cores
 // Define shared_control instance declared in header
 SharedControl shared_control = { .mutex = {}, .pid_output = 0.0f, .new_data = false };
