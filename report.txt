@@ -1,35 +1,36 @@
 m# Line Follower Robot Code Report
 
 ## Project Overview
-This project implements a high-performance line follower robot using the Raspberry Pi Pico microcontroller. The robot uses 8 infrared sensors connected to two ADS1115 analog-to-digital converters for line detection, with PID control for precise navigation. It features dual-core processing for real-time sensor handling and motor control, supporting various line patterns including intersections and turns.
+This project implements a high-performance line follower robot using the Raspberry Pi Pico microcontroller. The robot uses 8 infrared sensors connected through a multiplexer to a single ADC channel for line detection, with PID control for precise navigation. It features dual-core processing for real-time sensor handling and motor control, supporting various line patterns including intersections and turns.
 
 ## Hardware Configuration
 
 ### Pin Assignments
-#### I2C Pins (ADS1115 Sensors)
-- Primary I2C Bus (i2c0):
-  - SDA: GPIO 0
-  - SCL: GPIO 1
-- Secondary I2C Bus (i2c1):
-  - SDA: GPIO 8
-  - SCL: GPIO 9
+#### Sensor Multiplexer Pins (SVK IR Sensors)
+- Multiplexer Select Pins:
+  - S0: GPIO 10
+  - S1: GPIO 11
+  - S2: GPIO 12
+- ADC Input: GPIO 26 (ADC0)
 
-#### Motor Control Pins (PWM for TC1508A Driver)
+#### Motor Control Pins (PWM for TB6612FNG Driver)
 - Left Motor Forward: GPIO 2
 - Left Motor Backward: GPIO 3
 - Right Motor Forward: GPIO 4
 - Right Motor Backward: GPIO 5
+- Left Motor PWM: GPIO 6
+- Right Motor PWM: GPIO 7
+- Motor Standby: GPIO 8
 
 #### Button Pins
 - Calibration Button: GPIO 14
 - Start/Stop Button: GPIO 15
 
 ### Sensors
-- Two ADS1115 ADC modules:
-  - Left ADS1115: I2C address 0x48 (ADDR grounded)
-  - Right ADS1115: I2C address 0x49 (ADDR to VDD)
-- 8 analog infrared sensors (4 per ADS1115)
-- Sensors read at 860 SPS for fast response
+- SVK IR Sensor Array with 8 sensors
+- Connected through analog multiplexer to single ADC channel
+- 12-bit ADC resolution (0-4095 range)
+- Sensors read sequentially with 10μs settling time per channel
 
 ## Software Architecture
 
@@ -41,8 +42,8 @@ This project implements a high-performance line follower robot using the Raspber
    - Shared control structures for inter-core communication
 
 2. **line_follower.c** - Main implementation file containing:
-   - Initialization functions (I2C, motors, sensors, buttons)
-   - Sensor reading and calibration
+   - Initialization functions (multiplexer, motors, sensors, buttons)
+   - Sensor reading and calibration (multiplexer-based ADC)
    - Line position calculation and pattern detection
    - PID controller implementation
    - Motor control functions
@@ -90,7 +91,7 @@ This project implements a high-performance line follower robot using the Raspber
 ### Advanced Features
 - Smart line recovery with systematic search patterns
 - Hysteresis for sensor activation
-- Error handling for I2C communication
+- Error handling for multiplexer/ADC communication
 - Interrupt-based button handling
 - Real-time state management
 
@@ -99,7 +100,7 @@ This project implements a high-performance line follower robot using the Raspber
 ### Build Process
 - Uses CMake with Pico SDK
 - Compiles to ELF binary (line_follower_robot.elf)
-- Links hardware libraries (GPIO, PWM, I2C, multicore)
+- Links hardware libraries (GPIO, PWM, ADC, multicore)
 
 ### Flashing
 - Use picotool or OpenOCD to flash the ELF file
@@ -133,7 +134,7 @@ This project implements a high-performance line follower robot using the Raspber
 
 ## Dependencies
 - Raspberry Pi Pico SDK
-- Hardware libraries: GPIO, PWM, I2C, multicore
+- Hardware libraries: GPIO, PWM, ADC, multicore
 - Standard C libraries: stdio, stdint, math, string
 
 This implementation provides a complete, production-ready line follower robot with advanced features for reliable navigation on complex line courses.
