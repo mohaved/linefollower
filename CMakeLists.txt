@@ -34,11 +34,10 @@ target_link_libraries(line_follower_robot
     pico_multicore
     pico_time
     hardware_pwm
-    hardware_i2c
+    hardware_adc
     hardware_gpio
     hardware_irq
 )
-
 pico_enable_stdio_usb(line_follower_robot 1)
 pico_enable_stdio_uart(line_follower_robot 0)
 

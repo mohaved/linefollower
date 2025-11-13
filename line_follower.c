@@ -9,7 +9,7 @@
 #include "pico/time.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
-#include "hardware/i2c.h"
+#include "hardware/adc.h"
 
 // Global variables
 static volatile RobotState current_state = STOPPED;
@@ -126,7 +126,7 @@ void init_line_follower(void) {
     shared_control.new_data = false;
     mutex_exit(&shared_control.mutex);
     
-    init_i2c();
+    init_multiplexer();
     init_motors();
     init_buttons();
     
@@ -136,21 +136,21 @@ void init_line_follower(void) {
     // No need to wait for core1 here - it will be launched by main()
 }
 
-// I2C initialization for ADS1115
-void init_i2c(void) {
-    // Initialize primary I2C (i2c0)
-    i2c_init(i2c0, 400000);
-    gpio_set_function(I2C_SDA_PIN, GPIO_FUNC_I2C);
-    gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
-    gpio_pull_up(I2C_SDA_PIN);
-    gpio_pull_up(I2C_SCL_PIN);
+// Initialize multiplexer for SVK IR sensors
+void init_multiplexer(void) {
+    // Initialize multiplexer select pins as outputs
+    gpio_init(MUX_S0);
+    gpio_init(MUX_S1);
+    gpio_init(MUX_S2);
 
-    // Initialize secondary I2C (i2c1) on separate pins to parallelize ADC reads
-    i2c_init(i2c1, 400000);
-    gpio_set_function(I2C1_SDA_PIN, GPIO_FUNC_I2C);
-    gpio_set_function(I2C1_SCL_PIN, GPIO_FUNC_I2C);
-    gpio_pull_up(I2C1_SDA_PIN);
-    gpio_pull_up(I2C1_SCL_PIN);
+    gpio_set_dir(MUX_S0, GPIO_OUT);
+    gpio_set_dir(MUX_S1, GPIO_OUT);
+    gpio_set_dir(MUX_S2, GPIO_OUT);
+
+    // Initialize ADC for reading sensor values
+    adc_init();
+    adc_gpio_init(MUX_SIG);
+    adc_select_input(0);  // ADC0 (GPIO 26) is MUX_SIG
 }
 
 // Initialize motors for TB6612FNG
@@ -220,71 +220,21 @@ void button_callback(uint gpio, uint32_t events) {
     }
 }
 
-// Read sensors through ADS1115
+// Read sensors through multiplexer and ADC
 void read_line_sensors(LineSensorArray *sensors) {
     mutex_enter_blocking(&sensor_mutex);
 
-    // ADS1115 configuration constants for fastest sampling
-    const uint16_t PGA_4_096 = (0x1 << 9); // ±4.096V
-    const uint16_t MODE_SINGLE = (1 << 8);
-    const uint16_t DR_860SPS = (0x7 << 5); // 860 samples per second (~1.16ms per conversion)
+    for (int i = 0; i < 8; i++) {
+        // Select multiplexer channel (S0, S1, S2)
+        gpio_put(MUX_S0, i & 0x01);
+        gpio_put(MUX_S1, (i >> 1) & 0x01);
+        gpio_put(MUX_S2, (i >> 2) & 0x01);
 
-    // For channels 0..3: start both conversions then read
-    for (int ch = 0; ch < 4; ch++) {
-        // MUX for single-ended AINx: 100 + x (according to ADS1115 datasheet)
-        uint16_t mux_left = (0x4 + (ch & 0x3)) << 12;
-        uint16_t config_left = (1 << 15) | mux_left | PGA_4_096 | MODE_SINGLE | DR_860SPS;
-        uint8_t cfg_left[3] = { ADS1115_REG_CONFIG, (uint8_t)(config_left >> 8), (uint8_t)(config_left & 0xFF) };
+        // Small delay for multiplexer settling
+        sleep_us(10);
 
-        uint16_t mux_right = (0x4 + (ch & 0x3)) << 12;
-        uint16_t config_right = (1 << 15) | mux_right | PGA_4_096 | MODE_SINGLE | DR_860SPS;
-        uint8_t cfg_right[3] = { ADS1115_REG_CONFIG, (uint8_t)(config_right >> 8), (uint8_t)(config_right & 0xFF) };
-
-        // Start conversion on left ADS (i2c0) and right ADS (i2c1)
-        i2c_write_blocking(i2c0, ADS1115_LEFT_ADDR, cfg_left, 3, false);
-        i2c_write_blocking(i2c1, ADS1115_RIGHT_ADDR, cfg_right, 3, false);
-
-        // Wait for conversion: at 860 SPS => ~1.16ms; use 2ms to be safe and allow I2C overhead
-        sleep_ms(2);
-
-        // Read left conversion with error handling
-        uint8_t reg = ADS1115_REG_CONVERSION;
-        uint8_t read_bytes_l[2] = {0, 0};
-        bool success = true;
-        
-        if (i2c_write_blocking(i2c0, ADS1115_LEFT_ADDR, &reg, 1, false) < 0) {
-            success = false;
-        }
-        
-        if (success && i2c_read_blocking(i2c0, ADS1115_LEFT_ADDR, read_bytes_l, 2, false) < 0) {
-            success = false;
-        }
-        
-        if (success) {
-            int16_t signed_l = (int16_t)((read_bytes_l[0] << 8) | read_bytes_l[1]);
-            sensors->raw_values[ch] = (signed_l > 0) ? (uint16_t)signed_l : 0;
-        } else {
-            sensors->raw_values[ch] = sensors->calibrated_min[ch]; // Use min value on error
-        }
-
-        // Read right conversion with error handling
-        uint8_t read_bytes_r[2] = {0, 0};
-        success = true;
-        
-        if (i2c_write_blocking(i2c1, ADS1115_RIGHT_ADDR, &reg, 1, false) < 0) {
-            success = false;
-        }
-        
-        if (success && i2c_read_blocking(i2c1, ADS1115_RIGHT_ADDR, read_bytes_r, 2, false) < 0) {
-            success = false;
-        }
-        
-        if (success) {
-            int16_t signed_r = (int16_t)((read_bytes_r[0] << 8) | read_bytes_r[1]);
-            sensors->raw_values[ch + 4] = (signed_r > 0) ? (uint16_t)signed_r : 0;
-        } else {
-            sensors->raw_values[ch + 4] = sensors->calibrated_min[ch + 4]; // Use min value on error
-        }
+        // Read ADC value (12-bit, 0-4095)
+        sensors->raw_values[i] = adc_read();
     }
 
     mutex_exit(&sensor_mutex);
@@ -396,7 +346,7 @@ void handle_line_lost(void) {
     }
 
     // Small delay to allow smooth movement
-    sleep_ms(50);
+    sleep_ms(10);
 }
 
 // Set motor speeds (-255 to 255) for TB6612FNG

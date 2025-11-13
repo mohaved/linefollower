@@ -4,7 +4,7 @@
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "pico/mutex.h"
-#include "hardware/i2c.h"
+#include "hardware/adc.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
 #include "hardware/irq.h"
@@ -47,21 +47,15 @@
 #define MOTOR_RIGHT_PWMB 7  // Right motor PWM speed
 #define MOTOR_STBY       8  // Standby pin (must be high to enable motors)
 
-#define I2C_SDA_PIN 10
-#define I2C_SCL_PIN 11
-// Optional second I2C bus (useful to parallelize ADS1115 reads)
-#define I2C1_SDA_PIN 12
-#define I2C1_SCL_PIN 13
+// SVK IR Sensor multiplexer pins
+#define MUX_S0 10  // Multiplexer select bit 0
+#define MUX_S1 11  // Multiplexer select bit 1
+#define MUX_S2 12  // Multiplexer select bit 2
+#define MUX_SIG 26  // Multiplexer analog output (ADC input) - ADC0
 
 // Button pins
 #define CALIBRATION_BTN 14
 #define START_STOP_BTN  15
-
-// ADS1115 settings
-#define ADS1115_LEFT_ADDR  0x48  // ADDR -> GND (1001000)
-#define ADS1115_RIGHT_ADDR 0x49  // ADDR -> VDD (1001001)
-#define ADS1115_REG_CONVERSION 0x00
-#define ADS1115_REG_CONFIG 0x01
 
 #define KP 1.0f
 #define KI 0.001f
@@ -134,7 +128,7 @@ typedef struct {
 // Initialization functions
 void init_line_follower(void);
 void init_motors(void);
-void init_i2c(void);
+void init_multiplexer(void);
 void init_buttons(void);
 
 // Sensor functions
