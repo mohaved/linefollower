@@ -38,14 +38,13 @@
 #define HIGH_SPEED_THRESH  180        // Threshold for high/low speed behavior
 
 // Pin definitions
-// Motor control pins for TB6612FNG
 #define MOTOR_LEFT_AIN1  2  // Left motor direction 1
 #define MOTOR_LEFT_AIN2  3  // Left motor direction 2
 #define MOTOR_RIGHT_BIN1 4  // Right motor direction 1
 #define MOTOR_RIGHT_BIN2 5  // Right motor direction 2
 #define MOTOR_LEFT_PWMA  6  // Left motor PWM speed
 #define MOTOR_RIGHT_PWMB 7  // Right motor PWM speed
-#define MOTOR_STBY       8  // Standby pin (must be high to enable motors)
+#define MOTOR_STBY       8  // Standby pin
 
 // SVK IR Sensor multiplexer pins
 #define MUX_S0 10  // Multiplexer select bit 0
@@ -57,6 +56,7 @@
 #define CALIBRATION_BTN 14
 #define START_STOP_BTN  15
 
+// PID constants
 #define KP 1.0f
 #define KI 0.001f
 #define KD 2.0f
@@ -125,43 +125,34 @@ typedef struct {
     float normalized[8];    // Normalized sensor values (0.0-1.0)
 } LineSensorArray;
 
-// Initialization functions
 void init_line_follower(void);
 void init_motors(void);
 void init_multiplexer(void);
 void init_buttons(void);
 
-// Sensor functions
 void read_line_sensors(LineSensorArray *sensors);
 void calibrate_sensors(LineSensorArray *sensors);
 float calculate_line_position(LineSensorArray *sensors);
 void handle_line_lost(void);
 
-// Motor control functions
 void set_motor_speeds(int16_t left_speed, int16_t right_speed);
 void stop_motors(void);
 
-// PID control functions
 void init_pid_controller(PIDController *pid, float kp, float ki, float kd);
 float calculate_pid(PIDController *pid, float error);
 
-// Button interrupt handlers
 void button_callback(uint gpio, uint32_t events);
 
-// Core 1 functions
 void core1_main(void);
 void core1_sensor_handler(void);
 
-// State management
 void set_robot_state(RobotState new_state);
 RobotState get_robot_state(void);
 
 extern SharedControl shared_control;
 
-// Motor mutex to protect concurrent motor updates from both cores
 extern mutex_t motor_mutex;
 
-// Utility functions
 LinePattern detect_line_pattern(LineSensorArray *sensors);
 
-#endif // LINE_FOLLOWER_H
+#endif
