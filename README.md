@@ -15,13 +15,12 @@ A high-performance line follower robot implementation for Raspberry Pi Pico usin
 ## Hardware Requirements
 
 ### Sensors
-- SVK IR Sensor Array (8 sensors)
-- Analog multiplexer (CD4051 or equivalent)
+- SVK IR Sensor Array with multiplexer (8 sensors)
 - Raspberry Pi Pico ADC (GPIO 26)
 
 ### Motor Driver
 - TB6612FNG motor driver
-- Two DC motors with encoders (optional)
+- RP390-ST-24100 motors
 
 ### Pin Configuration
 - **Sensor Select Pins**: GPIO 10 (S0), GPIO 11 (S1), GPIO 12 (S2)
